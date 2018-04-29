@@ -1,0 +1,457 @@
+---
+title: "Final_Project_ML"
+author: "Meghana_Nadig"
+date: "March 30, 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Reading all the files ( Flat files using read_file and CSV using read.csv) and joining to make a single file.
+
+#I have read 3 different files of movie data given by the Imdb. The u.data, u.csv and, u.user files containing user data and thier rating history of different movies. Each user has atleast rated 20 movies, which I have combined to make a single merged file called merged_data.csv
+
+```{r}
+library(readr)  # to use read_file
+library("plyr")
+
+setwd("C:/Users/Meghana Nadig/Downloads/Big Data Project/ml-100k")
+
+#read the u.data file 
+user_data <- read_file("u.data")
+user_ratings <- read_delim(user_data, delim = "\t")
+
+#takes names (row) and appends it to the actual data part
+user_ratings[nrow(user_ratings)+1,] <- names(user_ratings)
+
+
+#fix names
+names(user_ratings) <- c("userID", "itemID", "rating", "timestamp")
+nrow(user_ratings) #100000zxfxr
+
+#read in items data
+user_data1 <- read.csv("u.csv",sep = "|")
+
+colnames(user_data1) = c("itemID", "title", "releaseDate", "videoReleaseDate",
+               "IMDb", "Action", "Adventure", "Animation",
+               "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
+               "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
+               "Thriller", "War", "Western")
+
+user_data1 <- user_data1[,-4]
+user_data1 <- user_data1[,-23]
+nrow(user_data1) #1681
+
+#read in users data
+user_data2 <- read_file("u.user")
+users <- read_delim(user_data2, delim = "|")
+users[nrow(users)+1,] <- names(users)
+names(users) <- c("userID", "age", "gender", "occupation", "zip")
+nrow(users) #943
+
+#merge the data
+
+merge1 <- join(user_ratings, users, type = 'inner')
+merged_data <- join(merge1, user_data1)
+nrow(merged_data)
+merged_data <- merged_data[c(-23,-454,-957,-971),]
+
+
+```
+
+# Data Preparation and Web Scraping
+
+#I needed more features inorder to build a recommendation system. Hence I have scraped more data such as runtime, language, Imdb rating etc which I am later joined with the initial merged_data.csv in order to get the final dataset that I'll be using for building the recommendation system. 
+
+# I have used the API token from the Imdb site and inorder to obtain additional data from Imdb for our movies I have scraped using the movie_title. Since Imdb has a limit of 1000 movies for every token request I have run the code multiple times and have collected the data.
+
+# I have also commented the scraping part as thats tedious and time consuming to run it everytime. I have saved the scraped data in local (which I have provided the link to in the submission file) and have loaded it later into movies_data variable.
+
+
+```{r}
+library("lubridate")
+#Check out what the current classes are
+sapply(merged_data, class)
+
+#Make timestamp and age numeric
+merged_data$timestamp <- as.numeric(merged_data$timestamp)
+merged_data$age <- as.numeric (merged_data$age)
+
+#Make Gender, rating, genre columns and Occupation factors
+merged_data$rating <- as.factor(merged_data$rating)
+merged_data$gender <- as.factor(merged_data$gender)
+merged_data$occupation <- as.factor(merged_data$occupation)
+merged_data[,12:29] <- lapply(merged_data[,12:29], as.factor)
+ncol(merged_data)
+#Use Lubridate to read in releaseDate as a Date variable
+merged_data$releaseDate <- dmy(merged_data$releaseDate)
+
+library("plyr")
+
+#Standardize the ratings for each user
+merged_data <- ddply(merged_data, "userID", transform, std.ratings = scale(as.numeric(rating)))
+
+#Create a new view variable which says whether a user will like or dislike a movie
+merged_data <- transform(merged_data, view = ifelse(std.ratings>0, 1, -1))
+merged_data$view <- factor(merged_data$view, levels=c(1,-1), labels = c("LIKE","DISLIKE"))
+
+
+#convert timestamp to actual dates
+merged_data$timestamp <- as.Date(as.POSIXct(as.numeric(merged_data$timestamp), origin="1970-01-01"))
+
+#new feature - amount of time since release date and rating
+merged_data <- mutate(merged_data, timeSinceRelease = as.double(timestamp-releaseDate))
+library ("lubridate")
+#New features - Month and day of the week reviewed
+merged_data$monthReviewed <- as.factor(month(merged_data$timestamp))
+merged_data$dayReviewed <- as.factor(wday(merged_data$timestamp))
+
+
+titles <- unique(merged_data$title)
+#install.packages("stringr")
+library(stringr)
+library(RCurl)
+
+#Use the titles in the data set to generate the GET request urls 
+#titles <- str_replace_all(titles, "[(].*[)]", "")
+titles <- str_replace_all(titles, ", The", "")
+titles <- str_replace_all(titles, ",", "")
+titles <- str_trim(titles)
+titles <- str_replace_all(titles, " ", "+")
+library("httpuv")
+
+#http://www.omdbapi.com/?t=toy+story&y=&plot=short&r=json
+
+urls <- paste("http://www.omdbapi.com/?apikey=68c173cc&t=",titles,"&y=&plot=short&r=json", sep="")
+length(urls)
+index <- 0
+#Scrape all the JSON data into a list
+tryCatch({for (i in 1:100)
+{
+  index <- i
+  IMDBdat <- lapply(urls[i], function(x) fromJSON(getURL(x))) 
+}
+}, error = function(err) {
+  print(index)
+  print(err)
+})
+
+# I have used the library from JSON inorder to get the data from Imdb as it is being returned in JSON format from the website.
+
+library("RJSONIO")
+#IMDBdat <- lapply(urls[1300:1664], function(x) (fromJSON(getURL(x)))) 
+```
+
+# Merging the scraped data with original data.
+
+```{r}
+
+#Set up the IMDB data frame with the correct column names and character class
+#IMDBdf <- data.frame(unlist(IMDBdat))
+#IMDBdf <- rbind(IMDBdf, unlist(IMDBdat))
+#names(IMDBdf) <- names((IMDBdat))
+#IMDBdf <-IMDBdf[-1,]
+#IMDBdf <- as.data.frame(lapply(IMDBdf, as.character))
+
+#Read in all the IMDB data into the IMDB data frame
+#IMDBdf <-do.call(rbind, lapply(IMDBdat,unlist))
+#Remove items for which the GET request failed
+#IMDBdf <- IMDBdf[!(IMDBdf[,1] == "False"),]
+
+#length(IMDBdf)
+
+#Taking the useful columns
+#IMDB.clean <- IMDBdf[, c("Title", "Rated", "Runtime", "Language", "Country", "imdbRating")]
+#IMDB.clean <- as.data.frame(IMDB.clean)
+
+#Fixing the classes
+#IMDB.clean$imdbRating <- as.numeric(IMDB.clean$imdbRating)
+#IMDB.clean$Rated <- as.factor(IMDB.clean$Rated)
+#IMDB.clean$Title <- as.character(IMDB.clean$Title)
+
+#Runtimes expressed as (X min) - extract the numeric time
+#IMDB.clean$Runtime <- sapply(IMDB.clean$Runtime, function(x) {as.numeric(str_split(x, " ")[[1]][1])})
+
+
+#engineered "English" feature - says if movie is in English or not
+#IMDB.clean$English <- ifelse(str_detect(IMDB.clean$Language, "English"),T, F)
+#engineered "Foreign" features - says if movie is foreign to the USA
+#IMDB.clean$Foreign <- ifelse(str_detect(IMDB.clean$Country, "USA"),F, T)
+
+#IMDB.clean2 <- na.omit(IMDB.clean)
+#names(IMDB.clean2)[1] <- "title"
+
+
+#merged_data$title <- str_replace_all(merged_data$title, "[(].*[)]", "")
+
+#merged_data$title <- str_trim(merged_data$title)
+
+#movies.full <- join(merged_data, IMDB.clean2, type = 'inner')
+#movies.full <- movies.full[,-10]
+
+#write.csv(movies.full, file = "C:/Users/Meghana Nadig/Downloads/Big Data Project/ml-100k/movies_full3.csv")
+
+#movies_data <- read.csv("C:/Users/Meghana Nadig/Downloads/Big Data Project/ml-100k/movies_final.csv")
+
+```
+
+#Exploratory Data Analysis and finding correlation.
+
+# Reading the data from the merged data from scraped and initial data files.
+
+```{r}
+library("caret")
+library("psych")
+library("dplyr")
+library("plyr")
+library("readr")
+
+datamovies <- read.csv("C:/Users/Meghana Nadig/Downloads/Big Data Project/ml-100k/movies_final.csv",stringsAsFactors = FALSE)
+
+```
+
+# Handling Missing values we see that there are no significant missing values in the dataset.
+
+#Some of the data imputation strategies if there were any missing values would be impute it with mean, median or mode or ignore them completely or to keep them accordingly. It would be best to the human judgement and upon the data that has to be predicted to handle missing values. 
+
+```{r}
+
+colSums(is.na(datamovies))
+
+```
+
+# Determining outliers
+
+# Here we see that there are outliers in terms of age and those I am keeping them and not removing them as those might be helpful in recommending movies to population who are from that categories.
+# Others in the data do not have any significant outliers and determing outliers for userID,ItemID,language etc does not mean anything in our case. Hence I have only determined outliers for age.
+
+```{r}
+
+boxplot(datamovies$age)
+
+
+```
+
+# Creating dummy variables of categorical values to find correlation.
+
+```{r}
+
+#creating dummy variables of gender and finding correlation with rating
+dummy <-dummyVars("~ gender",data=datamovies, fullRank = T) 
+datamovies['gender_DV'] <- data.frame(predict(dummy, newdata = datamovies))
+
+cor(datamovies$rating,datamovies$gender_DV) 
+
+#timesincereleased is null so remove it
+datamovies <- datamovies[c(-32,-7)]
+
+
+# Converting timestamp from char to Date to find cor with rating
+datamovies$timestamp <- as.POSIXct(datamovies$timestamp, format="%m/%d/%Y")
+Timstamp_Numeric <- as.numeric(datamovies$timestamp)
+
+cor(Timstamp_Numeric, datamovies$rating)
+
+# Correlation of age with rating 
+cor(datamovies$rating,datamovies$age)
+
+# Correlation of runtime with rating
+cor(datamovies$rating,datamovies$Runtime)
+
+#Correlation of rating with dayReviewed
+cor(datamovies$rating,datamovies$dayReviewed)
+
+#Correlation of rating with monthReviewed
+cor(datamovies$rating,datamovies$monthReviewed)
+
+# Normalizing the values inorder to get correlation
+#correlation of rating with Imdb rating
+ratingnorm <- scale(datamovies$rating)
+summary(ratingnorm)
+Imdbratingnorm <- scale(datamovies$imdbRating)
+summary(Imdbratingnorm)
+datamovies$rating <- ratingnorm
+datamovies$imdbRating <- Imdbratingnorm
+
+
+cor(ratingnorm,Imdbratingnorm)
+
+# Converting occupation to dummy and finding cor with rating
+#datamovies['occupation_DV'] <- NA
+
+dummy <-dummyVars("~ occupation",data=datamovies, fullRank = T) #creating dummy variables from factors in movies set.
+moviedummy <- data.frame(predict(dummy, newdata = datamovies))
+
+anova <- aov(datamovies$rating ~ moviedummy$occupationartist + moviedummy$occupationdoctor + moviedummy$occupationeducator + moviedummy$occupationengineer + moviedummy$occupationentertainment + moviedummy$occupationexecutive + moviedummy$occupationhealthcare +moviedummy$occupationlawyer + moviedummy$occupationlibrarian +moviedummy$occupationmarketing + moviedummy$occupationnone +moviedummy$occupationother +moviedummy$occupationprogrammer +moviedummy$occupationretired +moviedummy$occupationsalesman +moviedummy$occupationscientist +moviedummy$occupationstudent +moviedummy$occupationtechnician +moviedummy$occupationwriter)
+
+anova$coefficients
+
+# We see that healthcare professionals have a negative correlation with ratings.
+
+
+```
+
+# Data preparation for clustering
+
+```{r}
+library(factoextra)
+library(klaR)
+library(MASS)
+library(fpc)
+library(caret)
+library(cluster)
+
+
+datamovies$occupation <- as.factor(datamovies$occupation)
+datamovies$view <- as.factor(datamovies$view)
+
+
+# Removing  columns such as movie title which is not needed for our analysis.
+df <- datamovies[,c(-9,-10,-11,-36,-37,-34,-5,-8,-33,-35,-36,-7)]
+
+```
+
+# Principal Component Analysis (PCA)
+
+# I have normalized the data for performing Principal component analysis which is an important step before implementing PCA which requires the data has to be a single scale before performing PCA.
+
+```{r}
+
+#Normalization of data for PCA
+normalize <- function(x)
+{ 
+return((x - min(x)) / (max(x) - min(x)))
+}
+
+moviesnorm <- as.data.frame(lapply(df[-24], normalize))
+dfdata <- preProcess(moviesnorm,method = c("BoxCox","center","scale","pca"))
+d <- predict(dfdata,df)
+
+```
+
+# I have used the elbow method to determine the value of K.
+
+# So where the graph becomes almost flat I have used that as the value of K. As we can see here I have taken K = 4 seeing the graph below.
+
+```{r}
+
+#Elbow Method for finding the optimal number of clusters
+set.seed(123)
+# Compute and plot wss for k = 2 to k = 15.
+k.max <- 15
+data <- moviesnorm
+value_k <- sapply(1:k.max, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+value_k
+plot(1:k.max, value_k,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+```
+
+# Hierarchical clustering and plotting dendogram for visualization and also the cutting of the dendogram using cutree function.
+
+# I have done hierarchical clustering because I want to group users into segments or groups inorder to be able to recommend movies for a customer in a particular group.
+
+# I have used Eucledian distance for calculating the distance as it is best suited with hierarchical clustering.
+
+# I have also used complete linkage hierarchical clustering as it is also called the farthest neighbor which means the the distance between the clusters is the distance between the two most distant objects.
+# This helps in creation of proper segmentation and clustering for building a movie recommendation system.
+
+```{r}
+# Dissimilarity matrix and hierarchical clustering
+
+subset <- d[1:1000,]
+p <- get_dist(subset,method = "euclidean")
+
+# Hierarchical clustering using Complete Linkage
+hc1 <- hclust(p, method = "complete" )
+
+# Plot the obtained dendrogram
+plot(hc1, cex = 0.6, hang = -1)
+
+
+groups <- cutree(hc1, k=4)
+
+
+subset$cluster <- groups
+
+```
+
+# Creating train and test data.
+
+```{r}
+
+# Creating Data partition into train and test 
+modeldata <- createDataPartition(subset$view,p=0.02)[[1]]
+train <- subset[modeldata,]
+test <- subset[-modeldata,]
+
+dummy <-dummyVars("~ view",data=test, fullRank = T) 
+test$viewLike <- data.frame(predict(dummy, newdata = test))
+
+```
+
+# Building rpart model on the train data and predicted test values. Achieved accuracy of 50.7% using Confusion Matrix.
+
+```{r}
+
+model.rpart <- train(view ~ ., method="rpart", data= train,trControl = trainControl(method = "cv", verboseIter = T))
+
+p.rpart <- predict(model.rpart,test)
+confusionMatrix(p.rpart,test$view)
+
+```
+
+# Building Random forest model on the train data and predicted test values and determing accuracy using Confusion Matrix.
+
+# I have created a Model ensemble using Random forest and achieved accuarcy of 71.43%
+
+```{r}
+model.rf <- train(view ~ ., method="rf", data= train,trControl = trainControl(method = "cv", verboseIter = T))
+p.rf <- predict(model.rf,test)
+confusionMatrix(p.rf,test$view)
+
+confusionMatrix(model.rf)
+
+```
+
+# Building logistic regression model on the train data and predicted test values. Achieved accuracy of 55.36% using Confusion Matrix.
+
+```{r}
+
+model.glm <- train(view ~ ., method="glm", data= train,trControl = trainControl(method = "cv", verboseIter = T))
+p.glm <- predict(model.glm,test)
+confusionMatrix(p.glm,test$view)
+
+```
+
+# Model Ensemble with accuracy of 49.23%
+
+```{r}
+p.ensemble<-as.factor(ifelse(p.rpart==1 & p.rf==1,1,ifelse(p.rpart==1 & p.glm==1,1,ifelse(p.rf==1 & p.glm==1,1,0)))) #calculated the mode or the majority of the predicted value from the three models -- logistic regression, randomforest and svm.
+
+confusionMatrix(p.ensemble, unlist(test$viewLike)) #Finding the accuracy using the confuiosn Matrix
+
+```
+# Model Comparison
+
+```{r}
+#Random forest is a model ensemble which yields a highest accuracy of 71.43%.
+#For a classification model random forest performs the best and other models such as rpart and logistic regression with accuracy of 50.7% and 55.36%  are also a got fit for the data.
+
+# Random forest itself is a model ensemble and tries to compare multiple models for achieving the accuracy in our case it performs the best.Rpart is used for classification by decision trees and also used to generate regression trees. Random forest helps in overfitting issue caused by decision trees. As we can see Random forest performs best as it combines multiple modelsusing bragging and boosting using this we can reduce the chances of coming across a classifier that does not perform well.
+  
+
+```
+
+Reference :
+https://pdfs.semanticscholar.org/1422/a2ff644eb3b91b1f2f9f8785083c53e87a40.pdf
+https://www.analyticsvidhya.com/blog/2017/02/introduction-to-ensembling-along-with-implementation-in-r/
+http://rpubs.com/conlaw/movierecommend
+https://www.r-bloggers.com/
+ 
+
+
+
